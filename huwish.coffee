@@ -5,37 +5,40 @@
 #   None
 #
 # Configuration:
-#   None
+#   HUWISH_STORAGE_KEY
 #
 # Commands:
 #   hubot wa <message>       # Add entry to wish list
 #   hubot wr <id>            # remove entry by their ID
 #   hubot wl                 # list all existing wishes
-#   hubot wt <id>            # take wishlist and indicate a 'DOING' action in a message
+#   hubot wt <id>            # take a wish and indicate a 'DOING' action in a message
+#   hubot wu <id>            # UN-take a wish
 #
 # Author:
 #   tone
-
 
 class Reminders
   constructor: (@robot) ->
     @cache = []
     @current_timeout = null
     @runningNo = 1
+    @storageKey
 
     @robot.brain.on 'loaded', =>
-      if @robot.brain.data.wishList
-        @cache = @robot.brain.data.wishList
+      @storageKey = process.env.HUWISH_STORAGE_KEY or 'wishList'
+      if @robot.brain.data[@storageKey]
+        @cache = @robot.brain.data[@storageKey]
         #@cache.splice(0, @cache.length)
         if @cache.length > 0
           @runningNo = @cache[@cache.length - 1].runningNo + 1
-      @robot.brain.data.wishList = @cache
+      @robot.brain.data[@storageKey] = @cache
 
   add: (wish) ->
     wish.runningNo = @runningNo
     @cache.push wish
-    @robot.brain.data.wishList = @cache
+    #@robot.brain.data.wishList = @cache
     @runningNo += 1
+    return wish.runningNo
 
   removeElement: (id) ->
     wishList = @listing()
@@ -45,55 +48,67 @@ class Reminders
     return [];
 
   listing: ->
-    wishList = @robot.brain.data.wishList
+    wishList = @robot.brain.data[@storageKey]
     return wishList
-
-  removeFirst: ->
-    reminder = @cache.shift()
-    @robot.brain.data.reminders = @cache
-    return reminder
-
-  queue: ->
-    clearTimeout @current_timeout if @current_timeout
-    if @cache.length > 0
-      now = new Date().getTime()
-      @removeFirst() until @cache.length is 0 or @cache[0].due > now
-      if @cache.length > 0
-        trigger = =>
-          reminder = @removeFirst()
-          @robot.send reminder.for, reminder.for.name + ', you asked me to remind you to ' + reminder.action
-          @queue()
-        @current_timeout = setTimeout trigger, @cache[0].due - now
 
   handleListing: (msg) ->
     wishList = @listing()
-
-    #msg.send 'Total wish(es) : ' + wishList.length
-
     for wish of wishList
-        msg.send wishList[wish].runningNo + ']: ' + wishList[wish].msg
+        wishObj = wishList[wish]
+        @handleDisplayWish(wishObj, msg)
+
+  handleDisplayWish: (wishObj, msg) ->
+    msg.send @formatWish(wishObj)
+
+  formatWish: (wishObj) ->
+    takingMsg = if wishObj.taking then '* ' + wishObj.taking + ' is TAKING * : ' else ''
+    return takingMsg + wishObj.runningNo + ']: ' + wishObj.msg + (if wishObj.createdBy then ' #' + wishObj.createdBy else '')
 
   handleRemove: (msg, id) ->
     wishList = @listing()
     success = @removeElement(id)
     if success.length > 0
-      msg.send 'Wish removed -> ' + success[0].msg
+      msg.send 'Wish removed -> ' + success[0].msg + (if success[0].createdBy then ' #' + success[0].createdBy else '')
 
   handleTake: (msg, id, userName) ->
     wishList = @listing()
     for key of wishList
       if (wishList[key].runningNo is parseInt(id, 10) )
-        wishMsg = wishList[key].msg
-        wishMsg = '* ' + userName + ' is TAKING * : ' + wishMsg
-        wishList[key].msg = wishMsg
-        msg.send wishMsg
+        wishObj = wishList[key]
+        oldTaking = wishObj.taking
+        if oldTaking
+          msg.send 'About to take taken wish, was #' + oldTaking
+        wishObj.taking = userName
+        @handleDisplayWish(wishObj, msg)
+
+  findWishById: (id) ->
+    wishList = @listing()
+    for key of wishList
+      if (wishList[key].runningNo is id )
+        wishObj = wishList[key]
+        return wishObj
+    return null
+
+  handleUnTake: (msg, id) ->
+    wishObj = @findWishById(id)
+    if wishObj
+      if wishObj.taking
+        wishObj.taking = null
+        msg.send 'Untaking, ' + @formatWish(wishObj)
+
+  handleAdd: (msg, wishMsg, userName) ->
+    wish = new Reminder(wishMsg, userName)
+    runNo = @add(wish)
+    msg.send "Added, id = " + runNo
+
 
 class Reminder
-  constructor: (msg) ->
+  constructor: (msg, createdBy) ->
     @msg = msg
-
-  msg: ->
-    return @msg
+    @createdBy = createdBy
+    now = new Date
+    @createdTime = now.toISOString()
+    #@taking
   
 module.exports = (robot) ->
 
@@ -101,29 +116,23 @@ module.exports = (robot) ->
 
   robot.respond /wa (.*)/i, (msg) ->
     wishMsg = msg.match[1].trim()
-    wish = new Reminder wishMsg
-    wish.msg = wish.msg + ' #' + msg.message.user.name
-    reminders.add(wish)
-    msg.send "Added"
+    reminders.handleAdd(msg, wishMsg, msg.message.user.name)
 
-  robot.hear /-wa (.*)/i, (msg) ->
+  robot.hear /^-wa (.*)/i, (msg) ->
     wishMsg = msg.match[1].trim()
-    wish = new Reminder wishMsg
-    wish.msg = wish.msg + ' #' + msg.message.user.name
-    reminders.add(wish)
-    msg.send "Added"
+    reminders.handleAdd(msg, wishMsg, msg.message.user.name)
 
   robot.respond /wl/i, (msg) ->
     reminders.handleListing(msg)
 
-  robot.hear /-wl/i, (msg) ->
+  robot.hear /^-wl/i, (msg) ->
     reminders.handleListing(msg)
 
   robot.respond /wr (.*)/i, (msg) ->
     id = msg.match[1].trim()
     reminders.handleRemove(msg, id)
 
-  robot.hear /-wr (.*)/i, (msg) ->
+  robot.hear /^-wr (.*)/i, (msg) ->
     id = msg.match[1].trim()
     reminders.handleRemove(msg, id)
 
@@ -131,9 +140,15 @@ module.exports = (robot) ->
     id = parseInt(msg.match[1].trim(), 10)
     reminders.handleTake(msg, id, msg.message.user.name)
 
-  robot.hear /-wt (.*)/i, (msg) ->
+  robot.hear /^-wt (.*)/i, (msg) ->
     id = parseInt(msg.match[1].trim(), 10)
     reminders.handleTake(msg, id, msg.message.user.name)
 
+  robot.respond /wu (.*)/i, (msg) ->
+    id = parseInt(msg.match[1].trim(), 10)
+    reminders.handleUnTake(msg, id)
 
+  robot.hear /^-wu (.*)/i, (msg) ->
+    id = parseInt(msg.match[1].trim(), 10)
+    reminders.handleUnTake(msg, id)
 
